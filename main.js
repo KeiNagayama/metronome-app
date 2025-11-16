@@ -28,6 +28,7 @@ let bpmSlider,
   bpmUpBtn,
   bpmDownBtn,
   toggleBtn,
+  centerVisual,
   pulseDot,
   subdivisionGroup,
   stepPill,
@@ -39,27 +40,36 @@ let bpmSlider,
   rangeMaxControl,
   openRangeControl,
   bpmScaleLabels,
-  pulseBeats,
   beatDots;
+
+let centerVisualBaseMargins = { top: 0, bottom: 0 };
+let layoutSyncRaf = null;
 
 // ===== UI helpers =====
 function clampBpm(value) {
   return Math.max(rangeMin, Math.min(rangeMax, value));
 }
 
-function updateBpmDisplay(value) {
+function setBpm(value, { syncSlider = true } = {}) {
   bpm = clampBpm(value);
+  if (syncSlider && bpmSlider) {
+    bpmSlider.value = bpm;
+  }
   if (bpmValueLabel) bpmValueLabel.textContent = bpm;
+  return bpm;
+}
+
+function adjustBpm(delta) {
+  setBpm(bpm + delta);
 }
 
 function updateStepSize(value) {
   stepSize = value;
   if (bpmSlider) {
     bpmSlider.step = stepSize;
-    const snapped = clampBpm(Math.round(bpm / stepSize) * stepSize);
-    bpmSlider.value = snapped;
-    updateBpmDisplay(snapped);
   }
+  const snapped = Math.round(bpm / stepSize) * stepSize;
+  setBpm(snapped);
   if (stepPill) {
     stepPill.textContent = `${stepSize} BPM`;
   }
@@ -107,14 +117,14 @@ function updateRange(min = rangeMin, max = rangeMax) {
   if (bpmSlider) {
     bpmSlider.min = rangeMin;
     bpmSlider.max = rangeMax;
-    const snapped = clampBpm(Math.round(bpm / stepSize) * stepSize);
-    bpmSlider.value = snapped;
-    updateBpmDisplay(snapped);
-  } else {
-    updateBpmDisplay(bpm);
   }
 
+  const snapped = Math.round(bpm / stepSize) * stepSize;
+  setBpm(snapped);
+
   refreshScaleLabels();
+
+  scheduleLayoutSync();
 }
 
 function buildRangeMenu(type) {
@@ -176,6 +186,58 @@ function closeRangeMenus() {
   }
 }
 
+function captureCenterVisualBaseMargins() {
+  if (!centerVisual) return;
+  const prevTop = centerVisual.style.marginTop;
+  const prevBottom = centerVisual.style.marginBottom;
+
+  centerVisual.style.marginTop = "";
+  centerVisual.style.marginBottom = "";
+
+  const computed = window.getComputedStyle(centerVisual);
+  centerVisualBaseMargins = {
+    top: parseFloat(computed.marginTop) || 0,
+    bottom: parseFloat(computed.marginBottom) || 0,
+  };
+
+  centerVisual.style.marginTop = prevTop;
+  centerVisual.style.marginBottom = prevBottom;
+}
+
+function adjustSliderVerticalPlacement() {
+  if (!centerVisual || !bpmSlider) return;
+
+  const sliderRect = bpmSlider.getBoundingClientRect();
+  const sliderCenter = sliderRect.top + sliderRect.height / 2;
+  const viewportCenter = window.innerHeight / 2;
+  const delta = viewportCenter - sliderCenter;
+
+  if (Math.abs(delta) < 0.5) return;
+
+  const bottomAdjust = delta * 0.7;
+  const topAdjust = delta - bottomAdjust;
+
+  const nextTop = Math.max(0, centerVisualBaseMargins.top + topAdjust);
+  const nextBottom = Math.max(0, centerVisualBaseMargins.bottom + bottomAdjust);
+
+  centerVisual.style.marginTop = `${nextTop}px`;
+  centerVisual.style.marginBottom = `${nextBottom}px`;
+}
+
+function syncSliderAndPulseLayout() {
+  adjustSliderVerticalPlacement();
+}
+
+function scheduleLayoutSync() {
+  if (layoutSyncRaf) {
+    cancelAnimationFrame(layoutSyncRaf);
+  }
+  layoutSyncRaf = requestAnimationFrame(() => {
+    layoutSyncRaf = null;
+    syncSliderAndPulseLayout();
+  });
+}
+
 // Defer DOM queries and listener setup until the document is ready
 document.addEventListener("DOMContentLoaded", () => {
   bpmSlider = document.getElementById("bpmSlider");
@@ -192,33 +254,30 @@ document.addEventListener("DOMContentLoaded", () => {
   rangeMaxControl = document.querySelector('.range-control[data-type="max"]');
   bpmScaleLabels = document.querySelectorAll(".bpm-scale span");
   // try multiple selectors to remain compatible with different HTML variants
+  centerVisual = document.querySelector(".center-visual");
+  captureCenterVisualBaseMargins();
   pulseDot = document.getElementById("pulseDot") || document.querySelector(".pulse-dot");
   subdivisionGroup = document.getElementById("subdivisionGroup");
-  // some markup uses id="pulseBeats", older file uses id="beatsRow"
-  pulseBeats = document.getElementById("pulseBeats") || document.getElementById("beatsRow");
-  beatDots = pulseBeats ? pulseBeats.querySelectorAll(".beat-dot") : [];
+  // support both current (#pulseBeats) and legacy (#beatsRow) containers
+  const beatContainer = document.querySelector("#pulseBeats, #beatsRow");
+  beatDots = beatContainer ? beatContainer.querySelectorAll(".beat-dot") : [];
 
   if (bpmSlider) {
     bpmSlider.step = stepSize;
     bpmSlider.addEventListener("input", (e) => {
-      updateBpmDisplay(parseInt(e.target.value, 10));
+      const value = parseInt(e.target.value, 10);
+      if (!Number.isNaN(value)) {
+        setBpm(value, { syncSlider: false });
+      }
     });
   }
 
   if (bpmUpBtn) {
-    bpmUpBtn.addEventListener("click", () => {
-      const next = clampBpm(bpm + stepSize);
-      if (bpmSlider) bpmSlider.value = next;
-      updateBpmDisplay(next);
-    });
+    bpmUpBtn.addEventListener("click", () => adjustBpm(stepSize));
   }
 
   if (bpmDownBtn) {
-    bpmDownBtn.addEventListener("click", () => {
-      const next = clampBpm(bpm - stepSize);
-      if (bpmSlider) bpmSlider.value = next;
-      updateBpmDisplay(next);
-    });
+    bpmDownBtn.addEventListener("click", () => adjustBpm(-stepSize));
   }
 
   if (stepPill) {
@@ -258,6 +317,12 @@ document.addEventListener("DOMContentLoaded", () => {
 
   updateRange(rangeMin, rangeMax);
   updateStepSize(stepSize);
+  scheduleLayoutSync();
+
+  window.addEventListener("resize", () => {
+    captureCenterVisualBaseMargins();
+    scheduleLayoutSync();
+  });
 
   if (subdivisionGroup) {
     subdivisionGroup.addEventListener("click", (e) => {
